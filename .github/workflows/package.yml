@@ -1,0 +1,60 @@
+# Copyright 2026 keplertech.io
+# SPDX-License-Identifier: Apache-2.0
+
+name: package
+
+on:
+  push:
+    branches: [ main, emin/add-ci-pkgs ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: package-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-linux-x64:
+    name: Package Linux x64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      # sccache-action does not enable the GHA cache backend by itself;
+      # without this, sccache falls back to an ephemeral local-disk cache.
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Install build dependencies
+        run: bash .github/scripts/install-build-deps.sh
+
+      - name: Build kepler-formal
+        run: .github/scripts/build-kepler-formal.sh
+
+      - name: Show sccache stats
+        if: always()
+        run: '"${SCCACHE_PATH:-sccache}" --show-stats'
+
+      - name: Package kepler-formal with runtime wrapper
+        run: .github/scripts/package-kepler-formal.sh
+
+      - name: Smoke test packaged tarball
+        run: |
+          smoke_dir="$(mktemp -d)"
+          tar -xzf dist/kepler-formal-linux-x64.tar.gz -C "${smoke_dir}"
+          "${smoke_dir}/kepler-formal/bin/kepler-formal" --help > /dev/null
+          "${smoke_dir}/kepler-formal/bin/kepler-formal" --version
+
+      - name: Upload binary package
+        uses: actions/upload-artifact@v4
+        with:
+          name: kepler-formal-linux-x64
+          path: dist/*.tar.gz
+          if-no-files-found: error
