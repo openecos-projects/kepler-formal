@@ -26,6 +26,8 @@ fi
 DEST="${1:?usage: bundle-runtime-deps.sh [--check] DEST_DIR ELF...}"
 shift
 [ "$#" -ge 1 ] || { echo "usage: bundle-runtime-deps.sh [--check] DEST_DIR ELF..." >&2; exit 1; }
+[ -d "${DEST}" ] || { echo "error: destination directory ${DEST} does not exist" >&2; exit 1; }
+DEST_REAL="$(realpath "${DEST}")"
 
 SYSTEM_LIB='^(linux-vdso\.so.*|ld-linux.*|ld64\.so.*|libc\.so.*|libm\.so.*|libdl\.so.*|libpthread\.so.*|librt\.so.*|libutil\.so.*|libgcc_s\.so.*|libresolv\.so.*|libnsl\.so.*|libnss_.*|libanl\.so.*|libcrypt\.so.*)$'
 
@@ -46,17 +48,27 @@ seen=" "
 rc=0
 
 visit() {
-  local file="$1" lib src
+  local file="$1" lib src target deps
   case "${seen}" in
     *" ${file} "*) return 0 ;;
   esac
   seen="${seen}${file} "
-  for lib in $(needed_by "${file}"); do
+
+  # A non-ELF or unreadable input must not masquerade as dependency-free.
+  deps="$(needed_by "${file}")" || fail "cannot read ELF dependencies from ${file}"
+  while IFS= read -r lib; do
+    [ -n "${lib}" ] || continue
     if [[ "${lib}" =~ ${SYSTEM_LIB} ]]; then
       continue
     fi
-    if [ -f "${DEST}/${lib}" ]; then
-      visit "${DEST}/${lib}"
+    if [ -e "${DEST}/${lib}" ] || [ -L "${DEST}/${lib}" ]; then
+      # Regular files and in-tree symlinks count as bundled; a symlink
+      # escaping DEST would make --check bless a host-provided library.
+      target="$(realpath "${DEST}/${lib}")"
+      case "${target}" in
+        "${DEST_REAL}"/*) visit "${target}" ;;
+        *) fail "${DEST}/${lib} is a symlink escaping the distribution directory" ;;
+      esac
       continue
     fi
     if [ "${MODE}" = "check" ]; then
@@ -67,10 +79,10 @@ visit() {
     src="$(resolve "${lib}")"
     [ -n "${src}" ] \
       || fail "cannot resolve runtime dependency '${lib}' (needed by ${file}) on this host"
-    cp -L "${src}" "${DEST}/${lib}"
+    cp --remove-destination -L "${src}" "${DEST}/${lib}"
     echo "bundled ${lib} <- ${src}"
     visit "${DEST}/${lib}"
-  done
+  done <<< "${deps}"
 }
 
 for elf in "$@"; do
