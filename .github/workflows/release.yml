@@ -105,6 +105,12 @@ jobs:
           test -f "${DIST}/lib/${lib}" || { echo "missing bundled ${lib}"; exit 1; }
         done
 
+        # Bundle the remaining non-system runtime closure (the embedded
+        # CPython from the host python3-config and its own deps), resolved
+        # through ldconfig on the build image.
+        bash .github/scripts/bundle-runtime-deps.sh "${DIST}/lib" \
+          "${DIST}/bin/kepler-formal" "${DIST}/bin/naja.so"
+
         # Create wrapper script that sets LD_LIBRARY_PATH for bundled libs
         printf '%s\n' \
           '#!/usr/bin/env bash' \
@@ -135,9 +141,37 @@ jobs:
         echo "max glibc symbol: ${MAX_GLIBC}"
         printf '%s\n' "${MAX_GLIBC#GLIBC_}" 2.28 | sort -CV || { echo "glibc floor regressed above 2.28"; exit 1; }
         readelf -p .comment "${DIST}/bin/kepler-formal" | grep clang
+        echo "=== runtime dependency closure ==="
+        # Every NEEDED of the shipped ELF files must be a base-system
+        # library or bundled in lib/ — the tarball must not lean on the
+        # host for anything else.
+        bash .github/scripts/bundle-runtime-deps.sh --check "${DIST}/lib" \
+          "${DIST}/bin/kepler-formal" "${DIST}/bin/naja.so" "${DIST}"/lib/*.so*
+        echo "=== ldd through the wrapper's view ==="
+        LD_LIBRARY_PATH="${DIST}/lib" ldd "${DIST}/bin/kepler-formal"
+        if LD_LIBRARY_PATH="${DIST}/lib" ldd "${DIST}/bin/kepler-formal" | grep -q "not found"; then
+          echo "unresolved runtime dependency"; exit 1
+        fi
+        echo "bundled libraries glibc ceilings:"
+        for so in "${DIST}"/lib/*.so*; do
+          ceiling="$(objdump -T "${so}" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 || true)"
+          echo "  ${so}: ${ceiling:-none}"
+        done
         echo "=== smoke test ==="
         "./${DIST}/kepler-formal" --help || true
         "./${DIST}/kepler-formal" --version
+
+    - name: Smoke test on a clean distro
+      if: steps.version.outputs.skip != 'true'
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+      run: |
+        DIST="kepler-formal-${VERSION}-linux-x86_64"
+        # ubuntu:24.04 has a newer glibc than the build image and no
+        # python3.10: the wrapper can only start if the tarball carries
+        # every non-system dependency itself.
+        docker run --rm -v "${PWD}:/pkg:ro" ubuntu:24.04 \
+          "/pkg/${DIST}/kepler-formal" --version
 
     - name: Create GitHub Release
       if: steps.version.outputs.skip != 'true'
