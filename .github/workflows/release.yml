@@ -50,9 +50,9 @@ jobs:
 
     - name: Set up Bazelisk
       if: steps.version.outputs.skip != 'true'
-      uses: bazel-contrib/setup-bazel@v0.15.0
-      with:
-        bazelisk-version: latest
+      # Bazelisk is preinstalled on the runner image and honors
+      # .bazelversion, like the bazel workflow.
+      run: bazelisk version
 
     - name: Cache Bazel outputs
       if: steps.version.outputs.skip != 'true'
