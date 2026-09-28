@@ -91,8 +91,9 @@ jobs:
         cp README.md LICENSE.rst "${DIST}/"
         cp -R mcp "${DIST}/mcp"
 
-        # Bundle the Naja shared runtime.
-        find bazel-bin/ -name 'libnaja_*.so' -exec cp {} "${DIST}/lib/" \;
+        # Bundle the Naja shared runtime. Bazel outputs are read-only and
+        # several matches can share a basename, so force the copy.
+        find bazel-bin/ -name 'libnaja_*.so' -exec cp -f {} "${DIST}/lib/" \;
         if ! find "${DIST}/lib" -maxdepth 1 -name 'libnaja_*.so' | grep -q .; then
           echo "Expected bundled naja shared libraries were not found."
           exit 1
@@ -101,7 +102,7 @@ jobs:
         # Bundle TBB (no static libs by design) from the hermetic Bazel
         # build — the exact libraries the binary and naja .so files link.
         for lib in libtbb.so.12 libtbbmalloc.so.2; do
-          find -L bazel-bin/ -name "${lib}" -print -quit | xargs -I{} cp -L {} "${DIST}/lib/"
+          find -L bazel-bin/ -name "${lib}" -print -quit | xargs -I{} cp -fL {} "${DIST}/lib/"
           test -f "${DIST}/lib/${lib}" || { echo "missing bundled ${lib}"; exit 1; }
         done
 
