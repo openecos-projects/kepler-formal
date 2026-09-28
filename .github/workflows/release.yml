@@ -6,23 +6,56 @@ name: release
 on:
   push:
     tags: ['v*']
+  schedule:
+    - cron: '37 17 * * *'
+  workflow_dispatch:
+    inputs:
+      suffix:
+        description: >-
+          Same-day nightly rerun suffix (integer >= 2), appended to the
+          nightly tag as .<n>. Required when today's nightly tag already
+          exists; published tags are never overwritten.
+        required: false
+        type: number
 
 permissions:
   contents: write
+
+# Stable tag pushes serialize per tag; nightly runs (scheduled or manual)
+# share a single group so nightly publishes never interleave.
+concurrency:
+  group: ${{ github.event_name == 'push' && format('release-{0}', github.ref) || 'release-nightly' }}
+  cancel-in-progress: false
 
 jobs:
   build-and-release:
     runs-on: ubuntu-22.04
 
+    # Stable releases are built from pushed v* tags. Nightly tags also match
+    # the 'v*' trigger, so exclude them explicitly (on top of GitHub's
+    # built-in GITHUB_TOKEN recursion guard) to keep nightly publishing from
+    # re-entering the stable path.
+    if: ${{ github.event_name != 'push' || !contains(github.ref_name, '-nightly.') }}
+
     steps:
     - uses: actions/checkout@v4
 
+    - name: Compute release version and tag
+      id: version
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SUFFIX: ${{ github.event.inputs.suffix }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: bash .github/scripts/compute-release-version.sh
+
     - name: Set up Bazelisk
+      if: steps.version.outputs.skip != 'true'
       uses: bazel-contrib/setup-bazel@v0.15.0
       with:
         bazelisk-version: latest
 
     - name: Cache Bazel outputs
+      if: steps.version.outputs.skip != 'true'
       uses: actions/cache@v4
       with:
         path: ~/.cache/bazel
@@ -31,6 +64,7 @@ jobs:
           bazel-release-${{ runner.os }}-
 
     - name: Install system dependencies
+      if: steps.version.outputs.skip != 'true'
       run: |
         sudo apt-get update
         sudo apt-get install -yq \
@@ -38,11 +72,14 @@ jobs:
           bison flex python3-dev
 
     - name: Build (optimized)
+      if: steps.version.outputs.skip != 'true'
       run: bazelisk build -c opt //src/bin:kepler-formal
 
     - name: Package
+      if: steps.version.outputs.skip != 'true'
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
       run: |
-        VERSION="${GITHUB_REF_NAME#v}"
         DIST="kepler-formal-${VERSION}-linux-x86_64"
         mkdir -p "${DIST}/bin" "${DIST}/lib"
 
@@ -81,8 +118,10 @@ jobs:
         sha256sum "${DIST}.tar.gz" > "${DIST}.tar.gz.sha256"
 
     - name: Verify
+      if: steps.version.outputs.skip != 'true'
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
       run: |
-        VERSION="${GITHUB_REF_NAME#v}"
         DIST="kepler-formal-${VERSION}-linux-x86_64"
         echo "=== ldd output ==="
         ldd "${DIST}/bin/kepler-formal"
@@ -101,12 +140,49 @@ jobs:
         "./${DIST}/kepler-formal" --version
 
     - name: Create GitHub Release
+      if: steps.version.outputs.skip != 'true'
       env:
         GH_TOKEN: ${{ github.token }}
+        TAG: ${{ steps.version.outputs.tag }}
+        VERSION: ${{ steps.version.outputs.version }}
+        TITLE: ${{ steps.version.outputs.title }}
+        NIGHTLY: ${{ steps.version.outputs.nightly }}
+        PREVIOUS_TAG: ${{ steps.version.outputs.previous_tag }}
       run: |
-        VERSION="${GITHUB_REF_NAME#v}"
-        gh release create "${GITHUB_REF_NAME}" \
-          --title "kepler-formal ${VERSION}" \
-          --generate-notes \
-          "kepler-formal-${VERSION}-linux-x86_64.tar.gz" \
+        set -euo pipefail
+        assets=(
+          "kepler-formal-${VERSION}-linux-x86_64.tar.gz"
           "kepler-formal-${VERSION}-linux-x86_64.tar.gz.sha256"
+        )
+        if [ "${NIGHTLY}" != "true" ]; then
+          gh release create "${TAG}" \
+            --title "${TITLE}" \
+            --generate-notes \
+            "${assets[@]}"
+          exit 0
+        fi
+
+        notes_file="$(mktemp)"
+        {
+          echo "Nightly build of kepler-formal from commit ${GITHUB_SHA}."
+          echo
+          if [ -n "${PREVIOUS_TAG}" ]; then
+            echo "Changes since ${PREVIOUS_TAG}: https://github.com/${GITHUB_REPOSITORY}/compare/${PREVIOUS_TAG}...${TAG}"
+            echo
+          fi
+          echo "This is an unstable nightly prerelease: it may change or be rebuilt at any time. Use the latest stable release for production."
+        } > "${notes_file}"
+        gh release create "${TAG}" \
+          --target "${GITHUB_SHA}" \
+          --prerelease \
+          --title "${TITLE}" \
+          --notes-file "${notes_file}" \
+          "${assets[@]}"
+
+    - name: Prune old nightly releases
+      if: ${{ github.event_name != 'push' && steps.version.outputs.skip != 'true' }}
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+        KEEP: ${{ vars.NIGHTLY_KEEP || '14' }}
+      run: bash .github/scripts/prune-nightlies.sh
