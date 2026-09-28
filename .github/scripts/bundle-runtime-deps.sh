@@ -36,7 +36,9 @@ needed_by() {
 }
 
 resolve() { # soname -> host path via ldconfig, empty when unknown
-  ldconfig -p | awk -v lib="$1" '$1 == lib {print $NF; exit}'
+  # awk consumes the whole listing: exiting at the first match would
+  # SIGPIPE ldconfig and trip pipefail despite the library being found.
+  ldconfig -p | awk -v lib="$1" '$1 == lib && found == "" {found = $NF} END {print found}'
 }
 
 fail() {
